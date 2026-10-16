@@ -15,8 +15,8 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("copathy")]
 [assembly: AssemblyProduct("copathy")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace copathy
 {
@@ -29,15 +29,25 @@ namespace copathy
         static void Main()
         {
             bool created;
+            using (var exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ExitEventName))
             using (var mutex = new Mutex(true, @"Local\copathy_SingleInstance", out created))
             {
-                if (!created) return; // 二重起動防止
+                if (!created)
+                {
+                    // 起動中のものがあれば終了してもらい、入れ替わる
+                    exitEvent.Set();
+                    try { if (!mutex.WaitOne(5000)) return; }
+                    catch (AbandonedMutexException) { }
+                }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 SetAutoStart(true);
-                Application.Run(new TrayContext());
+                Application.Run(new TrayContext(exitEvent));
+                mutex.ReleaseMutex();
             }
         }
+
+        public const string ExitEventName = @"Local\copathy_Exit";
 
         public static void SetAutoStart(bool enable)
         {
@@ -69,17 +79,21 @@ namespace copathy
         readonly Control invoker;
         readonly KeyboardHook hook;
 
-        public TrayContext()
+        public TrayContext(WaitHandle exitEvent)
         {
             invoker = new Control();
             invoker.CreateControl();
+
+            // 新しく起動されたら自動起動の登録は残したまま終了する
+            ThreadPool.RegisterWaitForSingleObject(exitEvent,
+                (s, timedOut) => invoker.BeginInvoke((Action)(() => ExitApp(false))), null, Timeout.Infinite, true);
 
             var menu = new ContextMenuStrip();
             menu.Items.Add(new ToolStripMenuItem(Program.AppName) { Enabled = false });
             menu.Items.Add(new ToolStripMenuItem("v" + Program.Version) { Enabled = false });
             menu.Items.Add(new ToolStripMenuItem("Ctrl+Alt+C でパスをコピー") { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(new ToolStripMenuItem("終了（自動起動も解除）", null, (s, e) => ExitApp()));
+            menu.Items.Add(new ToolStripMenuItem("終了（自動起動も解除）", null, (s, e) => ExitApp(true)));
 
             tray = new NotifyIcon
             {
@@ -110,9 +124,9 @@ namespace copathy
             }
         }
 
-        void ExitApp()
+        void ExitApp(bool removeAutoStart)
         {
-            Program.SetAutoStart(false);
+            if (removeAutoStart) Program.SetAutoStart(false);
             hook.Dispose();
             tray.Visible = false;
             tray.Dispose();
