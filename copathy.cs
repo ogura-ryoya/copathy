@@ -15,8 +15,8 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("copathy")]
 [assembly: AssemblyProduct("copathy")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace copathy
 {
