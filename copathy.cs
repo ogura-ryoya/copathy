@@ -209,9 +209,10 @@ namespace copathy
 
             Type t = Type.GetTypeFromProgID("Shell.Application");
             dynamic shell = Activator.CreateInstance(t);
+            dynamic windows = null;
             try
             {
-                dynamic windows = shell.Windows();
+                windows = shell.Windows();
                 int count = windows.Count;
                 for (int i = 0; i < count; i++)
                 {
@@ -227,7 +228,11 @@ namespace copathy
                     finally { Marshal.ReleaseComObject(w); }
                 }
             }
-            finally { Marshal.ReleaseComObject(shell); }
+            finally
+            {
+                if (windows != null) Marshal.ReleaseComObject(windows);
+                Marshal.ReleaseComObject(shell);
+            }
             return null;
         }
 

@@ -45,6 +45,11 @@ D:\Backup\old.txt
 - 何も選択していないときは何もしません
 - エクスプローラーが前面にあるときだけ反応するので、ほかのアプリの Ctrl+Alt+C はそのまま使えます
 
+## 動作環境
+
+- Windows 10 / 11
+- .NET Framework 4.x（Windows に標準で入っています）
+
 ## ビルド
 
 Windows 標準の .NET Framework のコンパイラを使うので、追加のインストールは不要です。
