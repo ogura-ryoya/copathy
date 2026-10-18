@@ -1,12 +1,15 @@
 ﻿# copathy: エクスプローラーで Ctrl+Alt+C を押すと、選択中のファイル・フォルダのパスをまとめてコピーする。
 # トレイに常駐し、自動起動を登録する。起動時と「更新を確認」で GitHub の最新リリースに更新する。
-$Version = '2.0.0'
+$Version = '2.0.1'
 $AppName = 'copathy'
 $Repo = 'ogura-ryoya/copathy'
 
 $ps1 = $MyInvocation.MyCommand.Path
 $appDir = Split-Path $ps1
 $startupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) "$AppName.lnk"
+$startMenuLnk = Join-Path ([Environment]::GetFolderPath('Programs')) "$AppName.lnk"
+$icoPath = Join-Path $appDir "$AppName.ico"
+$appId = "ogura-ryoya.$AppName"  # 通知でほかの PowerShell 製ツールと区別する ID
 $installedFlag = Join-Path $appDir 'installed.flag'    # インストール直後
 $updatedFlag = Join-Path $appDir 'updated.flag'        # 更新直後（中身は新しい版）
 $rolledBackFlag = Join-Path $appDir 'rolledback.flag'  # 更新した版が起動できず戻した（中身はその版）
@@ -20,6 +23,7 @@ function New-Shortcut($path) {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
     $s.TargetPath = $conhost
     $s.Arguments = $launchArgs
+    $s.IconLocation = "$icoPath,0"
     $s.WindowStyle = 7
     $s.Save()
 }
@@ -46,15 +50,13 @@ if (-not $acquired) { exit }  # すでに起動している
 # v1 の exe 版が使っていたレジストリの自動起動を消す
 Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $AppName -ErrorAction SilentlyContinue
 
-$autostartFailed = $false
-try { New-Shortcut $startupLnk } catch { $autostartFailed = $true }
-
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -114,20 +116,68 @@ public class ExplorerHotkey : NativeWindow, IDisposable {
     }
 
     // 黄色いフォルダに青い線。32×32 を基準に拡大・縮小する
-    public static Icon MakeIcon(int size) {
-        using (var b = new Bitmap(size, size)) {
-            using (var g = Graphics.FromImage(b))
-            using (var folder = new SolidBrush(Color.FromArgb(255, 200, 70)))
-            using (var pen = new Pen(Color.FromArgb(40, 90, 200), 3f)) {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.ScaleTransform(size / 32f, size / 32f);
-                g.FillRectangle(folder, 2, 6, 12, 5);
-                g.FillRectangle(folder, 2, 9, 28, 19);
-                g.DrawLine(pen, 8, 15, 24, 15);
-                g.DrawLine(pen, 8, 21, 19, 21);
-            }
-            return Icon.FromHandle(b.GetHicon());
+    static Bitmap Draw(int size) {
+        var b = new Bitmap(size, size);
+        using (var g = Graphics.FromImage(b))
+        using (var folder = new SolidBrush(Color.FromArgb(255, 200, 70)))
+        using (var pen = new Pen(Color.FromArgb(40, 90, 200), 3f)) {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.ScaleTransform(size / 32f, size / 32f);
+            g.FillRectangle(folder, 2, 6, 12, 5);
+            g.FillRectangle(folder, 2, 9, 28, 19);
+            g.DrawLine(pen, 8, 15, 24, 15);
+            g.DrawLine(pen, 8, 21, 19, 21);
         }
+        return b;
+    }
+
+    public static Icon MakeIcon(int size) {
+        using (var b = Draw(size)) return Icon.FromHandle(b.GetHicon());
+    }
+
+    // 32×32 の PNG を 1 枚だけ入れた .ico を書き出す（ヘッダー 6 バイト＋項目 16 バイトのあとに PNG）
+    public static void SaveIco(string path) {
+        byte[] png;
+        using (var b = Draw(32))
+        using (var ms = new MemoryStream()) { b.Save(ms, ImageFormat.Png); png = ms.ToArray(); }
+        using (var w = new BinaryWriter(File.Create(path))) {
+            w.Write(new byte[] { 0, 0, 1, 0, 1, 0, 32, 32, 0, 0, 1, 0, 32, 0 });
+            w.Write(png.Length);
+            w.Write(22);
+            w.Write(png);
+        }
+    }
+}
+
+// 通知の見出しの名前とアイコンは、同じ ID を持つスタートメニューのショートカットから取られる
+public static class AppUserModel {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    static extern int SetCurrentProcessExplicitAppUserModelID(string id);
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPropertyStore {
+        void GetCount(out uint n);
+        void GetAt(uint i, IntPtr key);
+        void GetValue(IntPtr key, IntPtr value);
+        void SetValue(ref PropertyKey key, ref PropVariant value);
+        void Commit();
+    }
+    struct PropertyKey { public Guid fmtid; public uint pid; }
+    [StructLayout(LayoutKind.Explicit)]
+    struct PropVariant { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; [FieldOffset(16)] public IntPtr pad; }
+
+    // ショートカットに ID を書き込み、このプロセスにも同じ ID を設定する
+    public static void SetAppId(string lnkPath, string id) {
+        var link = (System.Runtime.InteropServices.ComTypes.IPersistFile)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046")));
+        link.Load(lnkPath, 2);  // STGM_READWRITE
+        var key = new PropertyKey { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 };  // System.AppUserModel.ID
+        var value = new PropVariant { vt = 31, p = Marshal.StringToCoTaskMemUni(id) };  // VT_LPWSTR
+        try {
+            var store = (IPropertyStore)link;
+            store.SetValue(ref key, ref value);
+            store.Commit();
+            link.Save(lnkPath, true);
+        } finally { Marshal.FreeCoTaskMem(value.p); Marshal.ReleaseComObject(link); }
+        SetCurrentProcessExplicitAppUserModelID(id);
     }
 }
 
@@ -199,6 +249,18 @@ public static class PathText {
 
 [ExplorerHotkey]::EnableDpiAwareness()
 
+# ショートカットのアイコンに使うので先に作る
+try { [ExplorerHotkey]::SaveIco($icoPath) } catch {}
+$autostartFailed = $false
+try { New-Shortcut $startupLnk } catch { $autostartFailed = $true }
+
+# 通知の見出しにアプリの名前とアイコンを出すため、同じ ID のショートカットをスタートメニューに作る（画面を作る前に行う）
+$startMenuLnkIsNew = -not (Test-Path $startMenuLnk)
+try {
+    New-Shortcut $startMenuLnk
+    [AppUserModel]::SetAppId($startMenuLnk, $appId)
+} catch {}
+
 $shell = New-Object -ComObject Shell.Application
 $hk = New-Object ExplorerHotkey
 $Warning = [System.Windows.Forms.ToolTipIcon]::Warning
@@ -248,7 +310,7 @@ $tray.ContextMenuStrip = $menu
 $githubItem.add_Click({ Start-Process "https://github.com/$Repo" })
 
 $exitItem.add_Click({
-    Remove-Item $startupLnk -ErrorAction SilentlyContinue
+    Remove-Item $startupLnk, $startMenuLnk -ErrorAction SilentlyContinue
     $updateTimer.Stop()
     $tray.Visible = $false
     $hk.Dispose()
@@ -285,10 +347,18 @@ $checkUpdate = {
 # 新しい版に入れ替えて起動し、起動の知らせ（copathyReady）を 60 秒待つ。来なければ元の版に戻す
 $applyUpdate = {
     param($update)
-    Copy-Item $ps1 $backupPs1 -Force
-    Copy-Item $update.Path $ps1 -Force
-    Remove-Item $update.Path -ErrorAction SilentlyContinue
-    Set-Content $updatedFlag $update.Version -Encoding UTF8
+    # ファイルを入れ替えてから画面を閉じる。入れ替えに失敗したら元に戻し、今の版のまま動き続ける
+    try {
+        Copy-Item $ps1 $backupPs1 -Force -ErrorAction Stop
+        try {
+            Copy-Item $update.Path $ps1 -Force -ErrorAction Stop
+            Set-Content $updatedFlag $update.Version -Encoding UTF8 -ErrorAction Stop
+        } catch {
+            Copy-Item $backupPs1 $ps1 -Force -ErrorAction SilentlyContinue
+            Remove-Item $updatedFlag -ErrorAction SilentlyContinue
+            throw
+        }
+    } finally { Remove-Item $update.Path -ErrorAction SilentlyContinue }
     $updateTimer.Stop()
     $tray.Visible = $false
     $hk.Dispose()
@@ -366,6 +436,13 @@ $tray.Visible = $true
 $readySignal = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\copathyReady')
 [void]$readySignal.Set()
 Remove-Item $backupPs1 -ErrorAction SilentlyContinue
+
+# 初めて作ったショートカットは Windows への登録に数秒かかる。登録前に通知すると見出しが ID になるので待つ。
+# 待つ間はホットキーが効かないので、新しく作ったときだけにする
+if ($startMenuLnkIsNew) {
+    $apps = $shell.Namespace('shell:AppsFolder')
+    for ($i = 0; $i -lt 20 -and -not $apps.ParseName($appId); $i++) { Start-Sleep -Milliseconds 500 }
+}
 
 if (Test-Path $installedFlag) {
     Remove-Item $installedFlag -ErrorAction SilentlyContinue
