@@ -1,0 +1,35 @@
+# copathy.ps1 の $Version が未リリースなら、検証して vX.Y.Z をリリースする。
+# run は BOM なしで実行され日本語が文字化けするので、英数字だけにして処理は .github/scripts に置く
+name: リリース
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - copathy.ps1
+      - .github/workflows/release.yml
+      - .github/scripts/**
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # リリースノート用に履歴とタグをすべて取得する
+
+      - name: copathy.ps1 を検証してバージョンを読み取る
+        id: check
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/check-version.ps1
+
+      - name: まだリリースされていなければリリースを作る
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/create-release.ps1

@@ -1,2 +1,5 @@
-* text=auto
-*.bat text eol=crlf
+# Windows PowerShell 5.1 向けに改行は CRLF にする（copathy.ps1 と install.ps1 は UTF-8 BOM 付きのまま保つ）
+*.ps1 text eol=crlf
+*.md text eol=lf
+# インストール用のショートカットはバイナリなので変換しない
+*.lnk binary
