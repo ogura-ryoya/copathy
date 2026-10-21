@@ -16,7 +16,7 @@ function Show-Error($message) {
 try {
     $source = Join-Path $PSScriptRoot 'copathy.ps1'
     if (-not (Test-Path $source)) {
-        throw "copathy.ps1 が見つかりません。ダウンロードした ZIP を展開してから、展開したフォルダの中で実行してください。"
+        throw "copathy.ps1 が見つからない。ダウンロードした ZIP を展開し、展開したフォルダの中で実行する。"
     }
     $dir = Join-Path $env:LOCALAPPDATA 'copathy'
     $ps1 = Join-Path $dir 'copathy.ps1'
@@ -39,9 +39,10 @@ try {
     [void]$ready.Reset()
     (Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$ps1`"").WaitForExit()
     if (-not $ready.WaitOne(60000)) {
-        throw 'copathy を起動できませんでした。PC を再起動してから、もう一度インストールしてください。'
+        throw 'copathy を起動できなかった。PC を再起動してから、もう一度インストールする。'
     }
 } catch {
-    Show-Error "インストールに失敗しました。`n`n$($_.Exception.Message)"
+    try { Add-Content (Join-Path $env:LOCALAPPDATA 'copathy\log.txt') "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$PID] インストールに失敗した: $_" -Encoding UTF8 } catch {}
+    Show-Error "インストールに失敗した。`n`n$($_.Exception.Message)"
     exit 1
 }
