@@ -9,6 +9,7 @@ on:
       - copathy.ps1
       - .github/workflows/release.yml
       - .github/scripts/**
+      - tests/**
   workflow_dispatch:
 
 permissions:
@@ -26,6 +27,10 @@ jobs:
         id: check
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/check-version.ps1
+
+      - name: テストを動かす
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/run.ps1
 
       - name: まだリリースされていなければリリースを作る
         shell: powershell
