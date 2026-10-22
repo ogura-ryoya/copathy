@@ -69,5 +69,9 @@ try {
     Check 'ログは 100KB を超えたら log.old.txt に回す' { (Test-Path (Join-Path $appDir 'log.old.txt')) -and (Get-Item $logFile).Length -lt 1KB }
 } finally { Remove-Item $appDir -Recurse -Force }
 
+# ---- ツールごとのテスト（tests\<本体の名前>.ps1 があれば読み込む。$main・$ast・Check を使える） ----
+$own = Join-Path $PSScriptRoot (Split-Path $main -Leaf)
+if (Test-Path $own) { . $own }
+
 Write-Host "`n失敗 $script:failures 件"
 exit [int]($script:failures -gt 0)
