@@ -1,8 +1,9 @@
 ﻿# copathy: エクスプローラーで Ctrl+Alt+C を押すと、選択中のファイル・フォルダのパスをまとめてコピーする。
 # トレイに常駐し、自動起動を登録する。起動時と「更新を確認」で GitHub の最新リリースに更新する。
-$Version = '2.1.0'
+$Version = '2.2.0'
 $AppName = 'copathy'
 $Repo = 'ogura-ryoya/copathy'
+$checkEveryHours = 24  # 起動時のほか、動いている間もこの時間ごとに更新を確認する（スリープで使い続ける PC にも届くように）
 
 $ps1 = $MyInvocation.MyCommand.Path
 $appDir = Split-Path $ps1
@@ -38,6 +39,14 @@ function New-Shortcut($path) {
 }
 
 function Start-Copathy { Start-Process $conhost -ArgumentList $launchArgs }
+
+# 裏に隠れないよう、最前面の見えないウィンドウを親にして出す
+function Show-Dialog($text, $title, [System.Windows.Forms.MessageBoxButtons]$buttons, [System.Windows.Forms.MessageBoxIcon]$icon) {
+    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0 }
+    $owner.Show()
+    $owner.Activate()
+    try { [System.Windows.Forms.MessageBox]::Show($owner, $text, $title, $buttons, $icon) } finally { $owner.Dispose() }
+}
 
 # 画面なしの起動（conhost --headless 経由）でなければ、画面なしで起動し直す
 $parentId = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
@@ -335,28 +344,33 @@ $stop = {
 
 # 終了はファイルとスタートメニューのショートカットを残す（そこから起動し直すと自動起動も登録し直す）
 $exitItem.add_Click({
-    Write-Log '終了（自動起動を外した）'
     Remove-Item $startupLnk -ErrorAction SilentlyContinue
+    if (Test-Path $startupLnk) {
+        Write-Log "終了（自動起動を外せなかった: $startupLnk）"
+        [void](Show-Dialog "自動起動を外せなかった。次のショートカットを手で消す。`n`n$startupLnk" "$AppName の終了" OK Warning)
+    } else { Write-Log '終了（自動起動を外した）' }
     & $stop
 })
 
-# 裏に隠れないよう、最前面の見えないウィンドウを親にして聞く
 $uninstallItem.add_Click({
-    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0 }
-    $owner.Show()
-    $owner.Activate()
-    $answer = [System.Windows.Forms.MessageBox]::Show($owner,
-        "$AppName をアンインストールする？`n`n自動起動、スタートメニューのショートカット、$appDir（ログも含む）をすべて消す。元に戻せない。",
-        "$AppName のアンインストール", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-    $owner.Dispose()
+    $answer = Show-Dialog "$AppName をアンインストールする？`n`n自動起動、スタートメニューのショートカット、$appDir（ログも含む）をすべて消す。元に戻せない。" `
+        "$AppName のアンインストール" YesNo Warning
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-    Remove-Item $startupLnk, $startMenuLnk -ErrorAction SilentlyContinue
+    $targets = @($startupLnk, $startMenuLnk)
+    Remove-Item $targets -ErrorAction SilentlyContinue
     # インストール先でなければ（リポジトリから直接動かしたときなど）フォルダは消さない
     if ($appDir -eq (Join-Path $env:LOCALAPPDATA $AppName)) {
         [Environment]::CurrentDirectory = $env:TEMP
         Set-Location $env:TEMP
         Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
+        $targets += $appDir
     } else { Write-Log "アンインストール（$appDir はインストール先でないので消さない）" }
+    # 消せなかったものは知らせる（フォルダが残っていればログも残っている）
+    $left = @($targets | Where-Object { Test-Path $_ })
+    if ($left.Count -gt 0) {
+        Write-Log "アンインストールで消せなかった: $($left -join ', ')"
+        [void](Show-Dialog "消せなかったものがある。$AppName は終了するので、次のものを手で消す。`n`n$($left -join "`n")" "$AppName のアンインストール" OK Warning)
+    }
     & $stop
 })
 
@@ -416,11 +430,17 @@ $applyUpdate = {
         Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
             Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*\copathy.ps1*' } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-        Copy-Item $backupPs1 $ps1 -Force
-        Remove-Item $updatedFlag -ErrorAction SilentlyContinue
-        Set-Content $skipFile $update.Version -Encoding UTF8
-        Set-Content $rolledBackFlag $update.Version -Encoding UTF8
-        Start-Copathy
+        # 戻せないとトレイも無く何も動いていない状態になるので、画面で知らせる
+        try {
+            Copy-Item $backupPs1 $ps1 -Force -ErrorAction Stop
+            Remove-Item $updatedFlag -ErrorAction SilentlyContinue
+            Set-Content $skipFile $update.Version -Encoding UTF8 -ErrorAction Stop
+            Set-Content $rolledBackFlag $update.Version -Encoding UTF8 -ErrorAction Stop
+            Start-Copathy
+        } catch {
+            Write-Log "v$Version に戻せなかった: $_"
+            [void](Show-Dialog "v$($update.Version) に更新できず、v$Version にも戻せなかった。$AppName をインストールし直す。" "$AppName の更新" OK Error)
+        }
     }
     $ready.Dispose()
     [System.Windows.Forms.Application]::Exit()
@@ -438,15 +458,17 @@ $startCheck = {
 }
 $updateItem.add_Click({ & $startCheck $true })
 
-# 起動直後に確認する。失敗したら 1 分後にやり直し（最大 5 回）、すべて失敗したら通知する
-$script:startupCheckAt = Get-Date
-$script:startupRetries = 5
+# 起動直後と、そのあと $checkEveryHours ごとに確認する。失敗したら 1 分後にやり直し（最大 5 回）、すべて失敗したら通知する。
+# スリープから戻ったときは時刻が過ぎているので、すぐ確認する
+$script:nextCheckAt = Get-Date
+$script:retries = 5
 $script:checking = $null
 $updateTimer = New-Object System.Windows.Forms.Timer
 $updateTimer.Interval = 1000
 $updateTimer.add_Tick({
-    if ($script:startupCheckAt -and (Get-Date) -ge $script:startupCheckAt) {
-        $script:startupCheckAt = $null
+    # 手動の確認中は待つ（先に予定を消すと、次の自動の確認がなくなる）
+    if ($script:nextCheckAt -and (Get-Date) -ge $script:nextCheckAt -and -not $script:checking) {
+        $script:nextCheckAt = $null
         & $startCheck $false
     }
     if (-not $script:checking -or -not $script:checking.Async.IsCompleted) { return }
@@ -456,7 +478,7 @@ $updateTimer.add_Tick({
     $failed = $false
     try { $update = @($script:checking.Shell.EndInvoke($script:checking.Async)) | Where-Object { $_ } | Select-Object -First 1 } catch {
         $failed = $true
-        Write-Log "更新を確認できなかった（$(if ($manual) { '手動' } else { "自動、残りのやり直し $script:startupRetries 回" })）: $_"
+        Write-Log "更新を確認できなかった（$(if ($manual) { '手動' } else { "自動、残りのやり直し $script:retries 回" })）: $_"
     }
     $script:checking.Shell.Dispose()
     $script:checking = $null
@@ -469,14 +491,19 @@ $updateTimer.add_Tick({
             Write-Log "v$($update.Version) に入れ替えられなかった: $_"
             $tray.ShowBalloonTip(5000, '更新できなかった', "v$($update.Version) に入れ替えられなかった。v$Version のまま使える。", $Warning)
         }
-    } elseif ($failed -and -not $manual -and $script:startupRetries -gt 0) {
-        $script:startupRetries--
-        $script:startupCheckAt = (Get-Date).AddMinutes(1)
+    } elseif ($failed -and -not $manual -and $script:retries -gt 0) {
+        $script:retries--
+        $script:nextCheckAt = (Get-Date).AddMinutes(1)
+        return
     } elseif ($failed) {
         $tray.ShowBalloonTip(5000, '更新を確認できなかった', 'インターネットの接続を確かめ、あとでトレイの「更新を確認」からやり直す。', $Warning)
     } else {
         Write-Log "最新版（$(if ($manual) { '手動' } else { '自動' })）"
         if ($manual) { $tray.ShowBalloonTip(5000, "$AppName は最新版だ", "v$Version", $Info) }
+    }
+    if (-not $manual) {
+        $script:retries = 5
+        $script:nextCheckAt = (Get-Date).AddHours($checkEveryHours)
     }
 })
 $updateTimer.Start()
