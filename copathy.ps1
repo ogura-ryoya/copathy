@@ -1,6 +1,6 @@
 ﻿# copathy: エクスプローラーで Ctrl+Alt+C を押すと、選択中のファイル・フォルダのパスをまとめてコピーする。
 # トレイに常駐し、自動起動を登録する。起動時と「更新を確認」で GitHub の最新リリースに更新する。
-$Version = '2.2.0'
+$Version = '2.3.0'
 $AppName = 'copathy'
 $Repo = 'ogura-ryoya/copathy'
 $checkEveryHours = 24  # 起動時のほか、動いている間もこの時間ごとに更新を確認する（スリープで使い続ける PC にも届くように）
@@ -24,10 +24,16 @@ function Write-Log($text) {
         Add-Content $logFile "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$PID] $($text -replace '\s*\r?\n\s*', ' | ')" -Encoding UTF8
     } catch {}
 }
-trap { Write-Log "想定外のエラーで止まった: $_ $($_.InvocationInfo.PositionMessage)"; break }
+# 画面なしで動くので、止まったことは画面でも知らせる（WinForms を読む前でも出せる Popup を使う）
+trap {
+    Write-Log "想定外のエラーで止まった: $_ $($_.InvocationInfo.PositionMessage)"
+    try { [void](New-Object -ComObject WScript.Shell).Popup("$AppName が想定外のエラーで止まった。`n`n$_`n`n理由はログに残した: $logFile", 0, $AppName, 16) } catch {}
+    break
+}
 
 $conhost = "$env:WINDIR\System32\conhost.exe"
-$launchArgs = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`""
+# 最後の headless は、画面なしで起動したことの目印
+$launchArgs = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`" headless"
 
 function New-Shortcut($path) {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
@@ -40,17 +46,20 @@ function New-Shortcut($path) {
 
 function Start-Copathy { Start-Process $conhost -ArgumentList $launchArgs }
 
-# 裏に隠れないよう、最前面の見えないウィンドウを親にして出す
-function Show-Dialog($text, $title, [System.Windows.Forms.MessageBoxButtons]$buttons, [System.Windows.Forms.MessageBoxIcon]$icon) {
+# 裏に隠れないよう、最前面の見えないウィンドウを親にして出す。
+# 出している間は更新を止める（止めると、閉じられたダイアログが初めの選択を返し、アンインストールなどが進んでしまう）
+$script:dialogs = 0
+function Show-Dialog($text, $title, [System.Windows.Forms.MessageBoxButtons]$buttons, [System.Windows.Forms.MessageBoxIcon]$icon,
+    [System.Windows.Forms.MessageBoxDefaultButton]$default = 'Button1') {
+    $script:dialogs++
     $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0 }
     $owner.Show()
     $owner.Activate()
-    try { [System.Windows.Forms.MessageBox]::Show($owner, $text, $title, $buttons, $icon) } finally { $owner.Dispose() }
+    try { [System.Windows.Forms.MessageBox]::Show($owner, $text, $title, $buttons, $icon, $default) } finally { $owner.Dispose(); $script:dialogs-- }
 }
 
-# 画面なしの起動（conhost --headless 経由）でなければ、画面なしで起動し直す
-$parentId = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
-if ((Get-CimInstance Win32_Process -Filter "ProcessId=$parentId").Name -ne 'conhost.exe') {
+# 画面なしの起動（目印の headless 付き）でなければ、画面なしで起動し直す
+if ($args -notcontains 'headless') {
     Start-Copathy
     return
 }
@@ -63,7 +72,10 @@ try {
     $ex = $_.Exception
     $acquired = ($ex -is [System.Threading.AbandonedMutexException]) -or ($ex.InnerException -is [System.Threading.AbandonedMutexException])
 }
-if (-not $acquired) { Write-Log 'すでに起動しているので終わる'; exit }
+# 二重起動のときは、動いている copathy に知らせてもらう（黙って終わると反応が無いように見える）
+$alreadyRunning = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Local\copathyAlreadyRunning')
+if (-not $acquired) { Write-Log 'すでに起動しているので、動いている copathy に知らせて終わる'; [void]$alreadyRunning.Set(); exit }
+$startedByUpdate = Test-Path $updatedFlag
 Write-Log "起動 v$Version PowerShell $($PSVersionTable.PSVersion) Windows $([Environment]::OSVersion.Version) $ps1"
 
 # v1 の exe 版が使っていたレジストリの自動起動を消す
@@ -87,7 +99,7 @@ public class ExplorerHotkey : NativeWindow, IDisposable {
     delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
     [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
     [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
-    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, uint mod, uint vk);
+    [DllImport("user32.dll", SetLastError = true)] static extern bool RegisterHotKey(IntPtr h, int id, uint mod, uint vk);
     [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr h, int id);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
@@ -101,8 +113,10 @@ public class ExplorerHotkey : NativeWindow, IDisposable {
     const uint EVENT_SYSTEM_FOREGROUND = 3, MOD_ALT = 1, MOD_CONTROL = 2, MOD_NOREPEAT = 0x4000, VK_C = 0x43;
     readonly WinEventProc proc;
     readonly IntPtr hook;
-    bool registered;
+    bool registered, failureReported;
     public event EventHandler Pressed;
+    public event EventHandler RegisterFailed;  // 登録できなかった（ほかのアプリが Ctrl+Alt+C を使っているなど）。1 回だけ
+    public int LastError { get; private set; }
 
     public ExplorerHotkey() {
         CreateHandle(new CreateParams());
@@ -119,7 +133,14 @@ public class ExplorerHotkey : NativeWindow, IDisposable {
 
     void Update(IntPtr fg) {
         bool want = IsExplorer(fg);
-        if (want && !registered) registered = RegisterHotKey(Handle, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_C);
+        if (want && !registered) {
+            registered = RegisterHotKey(Handle, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_C);
+            if (!registered && !failureReported && RegisterFailed != null) {
+                LastError = Marshal.GetLastWin32Error();
+                failureReported = true;
+                RegisterFailed(this, EventArgs.Empty);
+            }
+        }
         else if (!want && registered) { UnregisterHotKey(Handle, 1); registered = false; }
     }
 
@@ -256,8 +277,14 @@ public static class PathText {
         return paths.OrderBy(p => IsDir(p) ? 0 : 1).ThenBy(p => p, new Logical());
     }
 
-    // ZIP は Shell 上フォルダ扱いになるので、実際のフォルダかで判定する
-    static bool IsDir(string p) { try { return Directory.Exists(p); } catch { return false; } }
+    // ZIP は Shell 上フォルダ扱いになるので、実際のフォルダかで判定する。
+    // 長いパスが有効でない PC では 248 文字以上のフォルダが見えないので、\\?\ を付けて確かめる
+    static bool IsDir(string p) {
+        try {
+            if (p.Length >= 248 && !p.StartsWith(@"\\?\")) p = p.StartsWith(@"\\") ? @"\\?\UNC\" + p.Substring(2) : @"\\?\" + p;
+            return Directory.Exists(p);
+        } catch { return false; }
+    }
     static string AddSlash(string p) { return p.EndsWith("\\") ? p : p + "\\"; }
 
     class Logical : IComparer<string> {
@@ -285,22 +312,44 @@ $hk = New-Object ExplorerHotkey
 $Warning = [System.Windows.Forms.ToolTipIcon]::Warning
 $Info = [System.Windows.Forms.ToolTipIcon]::Info
 
+$hk.add_RegisterFailed({
+    Write-Log "Ctrl+Alt+C を登録できなかった（Windows のエラー $($hk.LastError)）。ほかのアプリが Ctrl+Alt+C を使っているかもしれない"
+    $tray.ShowBalloonTip(8000, 'Ctrl+Alt+C が使えない',
+        'ほかのアプリが Ctrl+Alt+C を使っているかもしれない。そのアプリを終了してから、エクスプローラーを選び直す。', $Warning)
+})
+
 $hk.add_Pressed({
     try {
         $fg = [ExplorerHotkey]::Foreground()
         $wins = @($shell.Windows() | Where-Object { $_.HWND -eq $fg.ToInt64() })
-        if ($wins.Count -eq 0) { return }
+        if ($wins.Count -eq 0) { Write-Log "Ctrl+Alt+C: 前面のエクスプローラー（$fg）が Shell.Windows に見つからない"; return }
         # タブは同じウィンドウを共有するので、表示中のタブのものを選ぶ
         $tab = [PathText]::ActiveTab($fg)
         $w = $wins | Where-Object { [PathText]::TabOf($_) -eq $tab } | Select-Object -First 1
-        if (-not $w) { $w = $wins[0] }
+        if (-not $w) {
+            # タブが 1 つならそれ。複数あってどれか分からないときは、別のタブの選択をコピーしないよう止める
+            if ($wins.Count -gt 1) { throw "表示中のタブが分からない（タブ $($wins.Count) 個）" }
+            $w = $wins[0]
+        }
         $paths = [string[]]@($w.Document.SelectedItems() | ForEach-Object { $_.Path })
     } catch {
         Write-Log "選択中のファイルを取得できなかった: $_"
         $tray.ShowBalloonTip(5000, '選択中のファイルを取得できなかった', 'もう一度 Ctrl+Alt+C を押す。', $Warning)
         return
     }
-    if ($paths.Count -eq 0) { return }
+    # コントロールパネルなどは ::{…}、ごみ箱は中の名前（$Recycle.Bin\…\$R…）になり、使えるパスにならない。
+    # PC やライブラリの中は実際のパスが取れるので止めない
+    $bad = @($paths | Where-Object { $_.StartsWith('::') -or $_ -like '*\$Recycle.Bin\*' })
+    if ($bad.Count -gt 0) {
+        Write-Log "Ctrl+Alt+C: パスにならないものが選ばれている（$($bad[0])）"
+        $tray.ShowBalloonTip(5000, 'この場所のパスはコピーできない', 'ごみ箱やコントロールパネルなどは、ファイルのパスにならない。', $Info)
+        return
+    }
+    if ($paths.Count -eq 0) {
+        Write-Log 'Ctrl+Alt+C: 何も選ばれていない'
+        $tray.ShowBalloonTip(5000, '何も選ばれていない', 'エクスプローラーでファイルやフォルダを選んでから Ctrl+Alt+C を押す。', $Info)
+        return
+    }
     try {
         [System.Windows.Forms.Clipboard]::SetDataObject([PathText]::Format($paths), $true, 5, 100)
         Write-Log "Ctrl+Alt+C: $($paths.Count) 個のパスをコピーした"
@@ -335,7 +384,9 @@ $tray.ContextMenuStrip = $menu
 $githubItem.add_Click({ Start-Process "https://github.com/$Repo" })
 $logItem.add_Click({ Start-Process notepad.exe "`"$logFile`"" })
 
+$script:stopping = $false
 $stop = {
+    $script:stopping = $true
     $updateTimer.Stop()
     $tray.Visible = $false
     $hk.Dispose()
@@ -354,10 +405,12 @@ $exitItem.add_Click({
 
 $uninstallItem.add_Click({
     $answer = Show-Dialog "$AppName をアンインストールする？`n`n自動起動、スタートメニューのショートカット、$appDir（ログも含む）をすべて消す。元に戻せない。" `
-        "$AppName のアンインストール" YesNo Warning
-    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-    $targets = @($startupLnk, $startMenuLnk)
-    Remove-Item $targets -ErrorAction SilentlyContinue
+        "$AppName のアンインストール" YesNo Warning Button2
+    # 出している間に終了や更新で止まったときも、ダイアログが閉じられて答えが返るので、止まっていれば何もしない
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes -or $script:stopping) { return }
+    # 通知の設定（Windows が作る）と、更新の確かめで残ったファイルも消す
+    $targets = @($startupLnk, $startMenuLnk, "HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\$appId", (Join-Path $env:TEMP 'copathy-update.ps1'))
+    Remove-Item $targets -Recurse -ErrorAction SilentlyContinue
     # インストール先でなければ（リポジトリから直接動かしたときなど）フォルダは消さない
     if ($appDir -eq (Join-Path $env:LOCALAPPDATA $AppName)) {
         [Environment]::CurrentDirectory = $env:TEMP
@@ -381,7 +434,10 @@ $uninstallItem.add_Click({
 $checkUpdate = {
     param($repo, $current, $skip, $manual)
     $ErrorActionPreference = 'Stop'
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # 古い既定（Ssl3, Tls）なら TLS 1.2 を足す。SystemDefault なら Windows に任せる（1.3 も使える）
+    if ([Net.ServicePointManager]::SecurityProtocol -ne 'SystemDefault') {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    }
     $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'copathy' } -TimeoutSec 15
     $tmp = Join-Path $env:TEMP 'copathy-update.ps1'
     Invoke-WebRequest "https://raw.githubusercontent.com/$repo/$($release.tag_name)/copathy.ps1" -OutFile $tmp -UseBasicParsing -TimeoutSec 30
@@ -417,6 +473,7 @@ $applyUpdate = {
         }
     } finally { Remove-Item $update.Path -ErrorAction SilentlyContinue }
     Write-Log "v$($update.Version) に入れ替えて起動する"
+    $script:stopping = $true
     $updateTimer.Stop()
     $tray.Visible = $false
     $hk.Dispose()
@@ -441,6 +498,9 @@ $applyUpdate = {
             Write-Log "v$Version に戻せなかった: $_"
             [void](Show-Dialog "v$($update.Version) に更新できず、v$Version にも戻せなかった。$AppName をインストールし直す。" "$AppName の更新" OK Error)
         }
+    } else {
+        # 前の版を消すのは、新しい版の起動を確かめたこちらの役目（新しい版が消すと、待ちが切れて戻すときにぶつかる）
+        Remove-Item $backupPs1 -ErrorAction SilentlyContinue
     }
     $ready.Dispose()
     [System.Windows.Forms.Application]::Exit()
@@ -466,6 +526,10 @@ $script:checking = $null
 $updateTimer = New-Object System.Windows.Forms.Timer
 $updateTimer.Interval = 1000
 $updateTimer.add_Tick({
+    if ($alreadyRunning.WaitOne(0)) {
+        $tray.ShowBalloonTip(5000, "$AppName はもう動いている", 'エクスプローラーでファイルやフォルダを選んで Ctrl+Alt+C を押すと、パスをコピーできる。', $Info)
+    }
+    if ($script:dialogs -gt 0) { return }  # ダイアログを出している間は更新しない
     # 手動の確認中は待つ（先に予定を消すと、次の自動の確認がなくなる）
     if ($script:nextCheckAt -and (Get-Date) -ge $script:nextCheckAt -and -not $script:checking) {
         $script:nextCheckAt = $null
@@ -510,10 +574,13 @@ $updateTimer.Start()
 
 $tray.Visible = $true
 
-# 起動できたことを知らせる（更新直後は前の copathy が待っている）。この処理は消さないこと
-$readySignal = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\copathyReady')
-[void]$readySignal.Set()
-Remove-Item $backupPs1 -ErrorAction SilentlyContinue
+# メニューやタイマーの中のエラーは trap に届かず .NET のエラー画面になるので、ここで受けてログと通知にする
+[System.Windows.Forms.Application]::add_ThreadException([System.Threading.ThreadExceptionEventHandler]{
+    param($s, $e)
+    $err = $e.Exception
+    Write-Log "想定外のエラー: $($err.GetType().Name) $($err.Message) $(if ($err.ErrorRecord) { $err.ErrorRecord.InvocationInfo.PositionMessage })"
+    $tray.ShowBalloonTip(8000, '想定外のエラーが起きた', "$($err.Message)`n理由はログに残した。", $Warning)
+})
 
 # 初めて作ったショートカットは Windows への登録に数秒かかる。登録前に通知すると見出しが ID になるので待つ。
 # 待つ間はホットキーが効かないので、新しく作ったときだけにする
@@ -543,5 +610,18 @@ if (Test-Path $installedFlag) {
     $tray.ShowBalloonTip(8000, '自動起動を登録できなかった',
         '次にサインインしたとき、copathy が自動で起動しないことがある。もう一度インストールする。', $Warning)
 }
+
+# 起動できたことを知らせる（更新直後は前の copathy が待っている）。この処理は消さないこと。
+# 画面の処理が回り始めてから知らせる（それより前に落ちる版は、前の copathy が戻す）
+$readyTimer = New-Object System.Windows.Forms.Timer
+$readyTimer.Interval = 1
+$readyTimer.add_Tick({
+    $readyTimer.Stop()
+    $script:readySignal = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\copathyReady')
+    [void]$script:readySignal.Set()
+    # 更新の途中でなければ、前に残った前の版は要らない（更新の途中なら、待っている前の copathy が消す）
+    if (-not $startedByUpdate) { Remove-Item $backupPs1 -ErrorAction SilentlyContinue }
+})
+$readyTimer.Start()
 [System.Windows.Forms.Application]::Run()
 $tray.Dispose()

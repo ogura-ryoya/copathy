@@ -1,0 +1,6 @@
+log.txt
+log.old.txt
+*.flag
+skip-version.txt
+copathy.ico
+copathy.backup.ps1
