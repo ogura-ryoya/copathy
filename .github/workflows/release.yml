@@ -1,10 +1,9 @@
-# copathy.ps1 の $Version が未リリースなら、検証して vX.Y.Z をリリースする。
+# どのブランチへのプッシュでもテストを動かす。main のときだけ、$Version が未リリースなら vX.Y.Z をリリースする。
 # run は BOM なしで実行され日本語が文字化けするので、英数字だけにして処理は .github/scripts に置く
 name: リリース
 
 on:
   push:
-    branches: [main]
     paths:
       - copathy.ps1
       - install.ps1
@@ -19,7 +18,7 @@ permissions:
 
 # 続けてプッシュしたとき、古い版のリリースがあとから「最新」になって配られないよう、1 つずつ順に動かす
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -39,7 +38,15 @@ jobs:
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/run.ps1
 
-      - name: まだリリースされていなければリリースを作る
+      - name: 版の上げ忘れを確かめる
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/check-bumped.ps1
+
+      - name: まだリリースされていなければリリースを作る（main のときだけ）
+        if: github.ref == 'refs/heads/main'
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
