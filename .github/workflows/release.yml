@@ -15,6 +15,11 @@ on:
 permissions:
   contents: write
 
+# 続けてプッシュしたとき、古い版のリリースがあとから「最新」になって配られないよう、1 つずつ順に動かす
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: windows-latest
