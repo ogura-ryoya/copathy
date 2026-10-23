@@ -1,8 +1,12 @@
-﻿# copathy: エクスプローラーで Ctrl+Alt+C を押すと、選択中のファイル・フォルダのパスをまとめてコピーする。
+﻿# ==== ここから copathy だけ（ほかはテストで copathy・Qpen と同じかを確かめる） ====
+# copathy: エクスプローラーで Ctrl+Alt+C を押すと、選択中のファイル・フォルダのパスをまとめてコピーする。
 # トレイに常駐し、自動起動を登録する。起動時と「更新を確認」で GitHub の最新リリースに更新する。
-$Version = '2.3.0'
+$Version = '2.4.0'
 $AppName = 'copathy'
 $Repo = 'ogura-ryoya/copathy'
+$Usage = 'Ctrl+Alt+C でパスをコピー'
+$Hint = 'エクスプローラーでファイルやフォルダを選んで Ctrl+Alt+C を押すと、パスをコピーできる。'  # 通知で使い方を知らせる
+# ==== ここまで ====
 $checkEveryHours = 24  # 起動時のほか、動いている間もこの時間ごとに更新を確認する（スリープで使い続ける PC にも届くように）
 
 $ps1 = $MyInvocation.MyCommand.Path
@@ -44,7 +48,7 @@ function New-Shortcut($path) {
     $s.Save()
 }
 
-function Start-Copathy { Start-Process $conhost -ArgumentList $launchArgs }
+function Start-App { Start-Process $conhost -ArgumentList $launchArgs -PassThru }
 
 # 裏に隠れないよう、最前面の見えないウィンドウを親にして出す。
 # 出している間は更新を止める（止めると、閉じられたダイアログが初めの選択を返し、アンインストールなどが進んでしまう）
@@ -60,7 +64,7 @@ function Show-Dialog($text, $title, [System.Windows.Forms.MessageBoxButtons]$but
 
 # 画面なしの起動（目印の headless 付き）でなければ、画面なしで起動し直す
 if ($args -notcontains 'headless') {
-    Start-Copathy
+    [void](Start-App)
     return
 }
 
@@ -75,8 +79,11 @@ try {
 # 二重起動のときは、動いている copathy に知らせてもらう（黙って終わると反応が無いように見える）
 $alreadyRunning = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Local\copathyAlreadyRunning')
 if (-not $acquired) { Write-Log 'すでに起動しているので、動いている copathy に知らせて終わる'; [void]$alreadyRunning.Set(); exit }
+# インストールし直すとき、インストーラーがこれで終わってもらう
+$quitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Local\$($AppName)Quit")
 $startedByUpdate = Test-Path $updatedFlag
 Write-Log "起動 v$Version PowerShell $($PSVersionTable.PSVersion) Windows $([Environment]::OSVersion.Version) $ps1"
+# ==== ここから copathy だけ ====
 
 # v1 の exe 版が使っていたレジストリの自動起動を消す
 Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $AppName -ErrorAction SilentlyContinue
@@ -122,8 +129,10 @@ public class ExplorerHotkey : NativeWindow, IDisposable {
         CreateHandle(new CreateParams());
         proc = (h, e, hwnd, o, c, t, tm) => Update(hwnd);
         hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, proc, 0, 0, 0);
-        Update(GetForegroundWindow());
     }
+
+    // RegisterFailed をつないでから呼ぶ（つなぐ前に登録に失敗すると知らせが出ない）
+    public void Start() { Update(GetForegroundWindow()); }
 
     static bool IsExplorer(IntPtr h) {
         var s = new StringBuilder(64);
@@ -292,6 +301,7 @@ public static class PathText {
     }
 }
 "@
+# ==== ここまで ====
 
 [ExplorerHotkey]::EnableDpiAwareness()
 
@@ -312,6 +322,7 @@ $hk = New-Object ExplorerHotkey
 $Warning = [System.Windows.Forms.ToolTipIcon]::Warning
 $Info = [System.Windows.Forms.ToolTipIcon]::Info
 
+# ==== ここから copathy だけ ====
 $hk.add_RegisterFailed({
     Write-Log "Ctrl+Alt+C を登録できなかった（Windows のエラー $($hk.LastError)）。ほかのアプリが Ctrl+Alt+C を使っているかもしれない"
     $tray.ShowBalloonTip(8000, 'Ctrl+Alt+C が使えない',
@@ -358,10 +369,10 @@ $hk.add_Pressed({
         $tray.ShowBalloonTip(5000, 'コピーできなかった', 'もう一度 Ctrl+Alt+C を押す。', $Warning)
     }
 })
+# ==== ここまで ====
 
 $tray = New-Object System.Windows.Forms.NotifyIcon
 $tray.Icon = [ExplorerHotkey]::MakeIcon([System.Windows.Forms.SystemInformation]::SmallIconSize.Width)
-$Usage = 'Ctrl+Alt+C でパスをコピー'
 $tray.Text = "$AppName v$Version`n$Usage"  # 63 文字まで
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -372,7 +383,7 @@ $hotkeyItem = New-Object System.Windows.Forms.ToolStripMenuItem $Usage
 foreach ($mi in $nameItem, $versionItem, $hotkeyItem) { $mi.Enabled = $false }  # 表示だけ
 $githubItem = New-Object System.Windows.Forms.ToolStripMenuItem 'GitHub を開く'
 $updateItem = New-Object System.Windows.Forms.ToolStripMenuItem '更新を確認'
-$logItem = New-Object System.Windows.Forms.ToolStripMenuItem 'ログを開く'
+$logItem = New-Object System.Windows.Forms.ToolStripMenuItem 'ログをコピー'
 $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem '終了（自動起動も解除）'
 $uninstallItem = New-Object System.Windows.Forms.ToolStripMenuItem 'アンインストール'
 foreach ($mi in $nameItem, $versionItem, $hotkeyItem, (New-Object System.Windows.Forms.ToolStripSeparator), $githubItem, $updateItem, $logItem,
@@ -382,7 +393,15 @@ foreach ($mi in $nameItem, $versionItem, $hotkeyItem, (New-Object System.Windows
 $tray.ContextMenuStrip = $menu
 
 $githubItem.add_Click({ Start-Process "https://github.com/$Repo" })
-$logItem.add_Click({ Start-Process notepad.exe "`"$logFile`"" })
+# ログを、手がかり（版・Windows・場所）と前のログの終わりも付けてクリップボードに入れる（そのまま Claude に貼る）
+$logItem.add_Click({
+    $old = Join-Path $appDir 'log.old.txt'
+    $text = @("$AppName v$Version PowerShell $($PSVersionTable.PSVersion) Windows $([Environment]::OSVersion.Version) $ps1")
+    if (Test-Path $old) { $text += '--- log.old.txt（終わりの 200 行）'; $text += @(Get-Content $old -Encoding UTF8 -Tail 200) }
+    if (Test-Path $logFile) { $text += '--- log.txt'; $text += @(Get-Content $logFile -Encoding UTF8) }
+    [System.Windows.Forms.Clipboard]::SetDataObject(($text -join "`r`n"), $true, 5, 100)
+    $tray.ShowBalloonTip(5000, 'ログをコピーした', '送り先に貼り付ける。', $Info)
+})
 
 $script:stopping = $false
 $stop = {
@@ -408,8 +427,8 @@ $uninstallItem.add_Click({
         "$AppName のアンインストール" YesNo Warning Button2
     # 出している間に終了や更新で止まったときも、ダイアログが閉じられて答えが返るので、止まっていれば何もしない
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes -or $script:stopping) { return }
-    # 通知の設定（Windows が作る）と、更新の確かめで残ったファイルも消す
-    $targets = @($startupLnk, $startMenuLnk, "HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\$appId", (Join-Path $env:TEMP 'copathy-update.ps1'))
+    # 通知の設定（Windows が作る）も消す
+    $targets = @($startupLnk, $startMenuLnk, "HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\$appId")
     Remove-Item $targets -Recurse -ErrorAction SilentlyContinue
     # インストール先でなければ（リポジトリから直接動かしたときなど）フォルダは消さない
     if ($appDir -eq (Join-Path $env:LOCALAPPDATA $AppName)) {
@@ -440,38 +459,43 @@ $checkUpdate = {
     }
     $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'copathy' } -TimeoutSec 15
     $tmp = Join-Path $env:TEMP 'copathy-update.ps1'
-    Invoke-WebRequest "https://raw.githubusercontent.com/$repo/$($release.tag_name)/copathy.ps1" -OutFile $tmp -UseBasicParsing -TimeoutSec 30
-
+    try {
+        Invoke-WebRequest "https://raw.githubusercontent.com/$repo/$($release.tag_name)/copathy.ps1" -OutFile $tmp -UseBasicParsing -TimeoutSec 30
+        $text = [IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8)
+    } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     $errors = $null
-    [void][Management.Automation.Language.Parser]::ParseFile($tmp, [ref]$null, [ref]$errors)
-    $match = [regex]::Match([IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8), "(?m)^\`$Version = '(\d+\.\d+\.\d+)'")
-    if ($errors.Count -gt 0 -or -not $match.Success) {
-        Remove-Item $tmp -ErrorAction SilentlyContinue
-        throw 'ダウンロードした copathy.ps1 が壊れている'
-    }
+    [void][Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
+    $match = [regex]::Match($text, "(?m)^\`$Version = '(\d+\.\d+\.\d+)'")
+    if ($errors.Count -gt 0 -or -not $match.Success) { throw 'ダウンロードした copathy.ps1 が壊れている' }
     $latest = [version]$match.Groups[1].Value
-    if ($latest -le [version]$current -or (-not $manual -and "$latest" -eq $skip)) {
-        Remove-Item $tmp -ErrorAction SilentlyContinue
-        return $null
-    }
-    [pscustomobject]@{ Version = "$latest"; Path = $tmp }
+    if ($latest -le [version]$current -or (-not $manual -and "$latest" -eq $skip)) { return $null }
+    [pscustomobject]@{ Version = "$latest"; Text = $text }
 }
 
-# 新しい版に入れ替えて起動し、起動の知らせ（copathyReady）を 60 秒待つ。来なければ元の版に戻す
+# 起動の知らせ（Ready）を待つ。起動したプロセス（conhost は中の PowerShell と一緒に終わる）が先に終われば、起動できない版なので待たない。
+# 返すのは ready（来た）、exited（先に終わった）、timeout（来なかった）
+function Wait-Ready($ready, $process, $ms = 60000) {
+    $until = (Get-Date).AddMilliseconds($ms)
+    while ((Get-Date) -lt $until) {
+        if ($ready.WaitOne(500)) { return 'ready' }
+        if ($process.HasExited) { if ($ready.WaitOne(0)) { return 'ready' } else { return 'exited' } }
+    }
+    'timeout'
+}
+
+# 新しい版に入れ替えて起動し、起動の知らせ（copathyReady）を待つ。来なければ元の版に戻す
 $applyUpdate = {
     param($update)
     # ファイルを入れ替えてから画面を閉じる。入れ替えに失敗したら元に戻し、今の版のまま動き続ける
+    Copy-Item $ps1 $backupPs1 -Force -ErrorAction Stop
     try {
-        Copy-Item $ps1 $backupPs1 -Force -ErrorAction Stop
-        try {
-            Copy-Item $update.Path $ps1 -Force -ErrorAction Stop
-            Set-Content $updatedFlag $update.Version -Encoding UTF8 -ErrorAction Stop
-        } catch {
-            Copy-Item $backupPs1 $ps1 -Force -ErrorAction SilentlyContinue
-            Remove-Item $updatedFlag -ErrorAction SilentlyContinue
-            throw
-        }
-    } finally { Remove-Item $update.Path -ErrorAction SilentlyContinue }
+        [IO.File]::WriteAllText($ps1, $update.Text, (New-Object System.Text.UTF8Encoding $true))
+        Set-Content $updatedFlag $update.Version -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Copy-Item $backupPs1 $ps1 -Force -ErrorAction SilentlyContinue
+        Remove-Item $updatedFlag -ErrorAction SilentlyContinue
+        throw
+    }
     Write-Log "v$($update.Version) に入れ替えて起動する"
     $script:stopping = $true
     $updateTimer.Stop()
@@ -481,11 +505,11 @@ $applyUpdate = {
     [void]$ready.Reset()
     $mutex.ReleaseMutex()
     $mutex.Dispose()
-    Start-Copathy
-    if (-not $ready.WaitOne(60000)) {
-        Write-Log "v$($update.Version) が 60 秒で起動しなかったので v$Version に戻す"
+    $result = Wait-Ready $ready (Start-App)
+    if ($result -ne 'ready') {
+        Write-Log "v$($update.Version) が$(if ($result -eq 'exited') { '起動してすぐ終わった' } else { ' 60 秒で起動しなかった' })ので v$Version に戻す"
         Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*\copathy.ps1*' } |
+            Where-Object { $_.ProcessId -ne $PID -and "$($_.CommandLine)".IndexOf($ps1, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         # 戻せないとトレイも無く何も動いていない状態になるので、画面で知らせる
         try {
@@ -493,7 +517,10 @@ $applyUpdate = {
             Remove-Item $updatedFlag -ErrorAction SilentlyContinue
             Set-Content $skipFile $update.Version -Encoding UTF8 -ErrorAction Stop
             Set-Content $rolledBackFlag $update.Version -Encoding UTF8 -ErrorAction Stop
-            Start-Copathy
+            # 起動の途中でこちらが終わると巻き込まれて消えることがあるので、知らせが来るまで待つ(来なければもう一度)
+            $back = 'exited'
+            for ($i = 0; $i -lt 2 -and $back -ne 'ready'; $i++) { [void]$ready.Reset(); $back = Wait-Ready $ready (Start-App) }
+            if ($back -ne 'ready') { throw "戻した v$Version が起動しない（$back）" }
         } catch {
             Write-Log "v$Version に戻せなかった: $_"
             [void](Show-Dialog "v$($update.Version) に更新できず、v$Version にも戻せなかった。$AppName をインストールし直す。" "$AppName の更新" OK Error)
@@ -526,8 +553,9 @@ $script:checking = $null
 $updateTimer = New-Object System.Windows.Forms.Timer
 $updateTimer.Interval = 1000
 $updateTimer.add_Tick({
+    if ($quitEvent.WaitOne(0)) { Write-Log 'インストールし直すので終わる'; & $stop; return }
     if ($alreadyRunning.WaitOne(0)) {
-        $tray.ShowBalloonTip(5000, "$AppName はもう動いている", 'エクスプローラーでファイルやフォルダを選んで Ctrl+Alt+C を押すと、パスをコピーできる。', $Info)
+        $tray.ShowBalloonTip(5000, "$AppName はもう動いている", $Hint, $Info)
     }
     if ($script:dialogs -gt 0) { return }  # ダイアログを出している間は更新しない
     # 手動の確認中は待つ（先に予定を消すと、次の自動の確認がなくなる）
@@ -573,6 +601,7 @@ $updateTimer.add_Tick({
 $updateTimer.Start()
 
 $tray.Visible = $true
+$hk.Start()
 
 # メニューやタイマーの中のエラーは trap に届かず .NET のエラー画面になるので、ここで受けてログと通知にする
 [System.Windows.Forms.Application]::add_ThreadException([System.Threading.ThreadExceptionEventHandler]{
@@ -593,13 +622,13 @@ if (Test-Path $installedFlag) {
     Remove-Item $installedFlag -ErrorAction SilentlyContinue
     Write-Log 'インストールした'
     $tray.ShowBalloonTip(8000, "$AppName をインストールした",
-        'エクスプローラーでファイルやフォルダを選んで Ctrl+Alt+C を押すと、パスをコピーできる。', $Info)
+        $Hint, $Info)
 } elseif (Test-Path $updatedFlag) {
     $newVersion = (Get-Content $updatedFlag -Encoding UTF8 -TotalCount 1)
     Remove-Item $updatedFlag, $skipFile -ErrorAction SilentlyContinue
     Write-Log "v$newVersion に更新した"
     $tray.ShowBalloonTip(8000, "$AppName を v$newVersion に更新した",
-        '引き続き、エクスプローラーで Ctrl+Alt+C を押すとパスをコピーできる。', $Info)
+        $Hint, $Info)
 } elseif (Test-Path $rolledBackFlag) {
     $failedVersion = (Get-Content $rolledBackFlag -Encoding UTF8 -TotalCount 1)
     Remove-Item $rolledBackFlag -ErrorAction SilentlyContinue
