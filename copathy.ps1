@@ -1,6 +1,6 @@
 ﻿# copathy: エクスプローラーで Ctrl+Alt+C を押すと、選択中のファイル・フォルダのパスをまとめてコピーする。
 # トレイに常駐し、自動起動を登録する。起動時と「更新を確認」で GitHub の最新リリースに更新する。
-$Version = '2.4.1'
+$Version = '2.5.0'
 $AppName = 'copathy'
 $Repo = 'ogura-ryoya/copathy'
 $Usage = 'Ctrl+Alt+C でパスをコピー'
@@ -9,6 +9,9 @@ $checkEveryHours = 24  # 起動時のほか、動いている間もこの時間�
 
 $ps1 = $MyInvocation.MyCommand.Path
 $appDir = Split-Path $ps1
+# インストール先（名前は $AppName だけから作る。名前を変えた写しは本物とぶつからない）。ここ以外では、ショートカット・消すスクリプト・登録を作らない
+$installDir = Join-Path $env:LOCALAPPDATA $AppName
+$isInstalled = [IO.Path]::GetFullPath($appDir).TrimEnd('\') -ieq [IO.Path]::GetFullPath($installDir).TrimEnd('\')
 $startupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) "$AppName.lnk"
 $startMenuLnk = Join-Path ([Environment]::GetFolderPath('Programs')) "$AppName.lnk"
 $icoPath = Join-Path $appDir "$AppName.ico"
@@ -18,7 +21,9 @@ $updatedFlag = Join-Path $appDir 'updated.flag'        # 更新直後（中身�
 $rolledBackFlag = Join-Path $appDir 'rolledback.flag'  # 更新した版が起動できず戻した（中身はその版）
 $skipFile = Join-Path $appDir 'skip-version.txt'       # 自動では更新しない版
 $backupPs1 = Join-Path $appDir 'copathy.backup.ps1'    # 更新前の版
-$logFile = Join-Path $appDir 'log.txt'                 # 問題があったときにユーザーが丸ごと Claude に貼る。100KB で log.old.txt に回す
+$uninstallPs1 = Join-Path $appDir 'uninstall.ps1'      # 消すスクリプト（正本はこのファイルの $uninstallScript。起動のたびに書き出す）
+$uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName"  # 「設定 > アプリ」の登録
+$logFile = Join-Path $appDir 'log.txt'                # 問題があったときにユーザーが丸ごと Claude に貼る。100KB で log.old.txt に回す
 
 function Write-Log($text) {
     try {
@@ -36,17 +41,20 @@ trap {
 $conhost = "$env:WINDIR\System32\conhost.exe"
 # 最後の headless は、画面なしで起動したことの目印
 $launchArgs = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`" headless"
+$uninstallArgs = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$uninstallPs1`""
 
+# 作業フォルダはユーザーのフォルダにする（展開したフォルダなどを握らない）
 function New-Shortcut($path) {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
     $s.TargetPath = $conhost
     $s.Arguments = $launchArgs
     $s.IconLocation = "$icoPath,0"
     $s.WindowStyle = 7
+    $s.WorkingDirectory = $env:USERPROFILE
     $s.Save()
 }
 
-function Start-App { Start-Process $conhost -ArgumentList $launchArgs -PassThru }
+function Start-App { Start-Process $conhost -ArgumentList $launchArgs -WorkingDirectory $env:USERPROFILE -PassThru }
 
 # 裏に隠れないよう、最前面の見えないウィンドウを親にして出す。
 # 出している間は更新を止める（止めると、閉じられたダイアログが初めの選択を返し、アンインストールなどが進んでしまう）
@@ -60,13 +68,22 @@ function Show-Dialog($text, $title, [System.Windows.Forms.MessageBoxButtons]$but
     try { [System.Windows.Forms.MessageBox]::Show($owner, $text, $title, $buttons, $icon, $default) } finally { $owner.Dispose(); $script:dialogs-- }
 }
 
+# 消すスクリプト（uninstall.ps1）が動いている（確認を出している間も）。あれば更新を始めない
+function Test-Uninstalling {
+    $m = $null
+    try { if ([Threading.Mutex]::TryOpenExisting("Local\$($AppName)Uninstalling", [ref]$m)) { $m.Dispose(); return $true } } catch {}
+    $false
+}
+
 # 画面なしの起動（目印の headless 付き）でなければ、画面なしで起動し直す
 if ($args -notcontains 'headless') {
     [void](Start-App)
     return
 }
+# 起動した場所（古い版が起動したときは展開したフォルダ）を握り続けないよう、作業フォルダをユーザーのフォルダにする
+try { Set-Location $env:USERPROFILE; [Environment]::CurrentDirectory = $env:USERPROFILE } catch {}
 
-$mutex = New-Object System.Threading.Mutex($false, 'Local\copathy')
+$mutex = New-Object System.Threading.Mutex($false, "Local\$AppName")
 try {
     $acquired = $mutex.WaitOne(0)
 } catch {
@@ -75,7 +92,7 @@ try {
     $acquired = ($ex -is [System.Threading.AbandonedMutexException]) -or ($ex.InnerException -is [System.Threading.AbandonedMutexException])
 }
 # 二重起動のときは、動いている copathy に知らせてもらう（黙って終わると反応が無いように見える）
-$alreadyRunning = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Local\copathyAlreadyRunning')
+$alreadyRunning = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, "Local\$($AppName)AlreadyRunning")
 if (-not $acquired) { Write-Log 'すでに起動しているので、動いている copathy に知らせて終わる'; [void]$alreadyRunning.Set(); exit }
 # インストールし直すとき、インストーラーがこれで終わってもらう
 $quitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Local\$($AppName)Quit")
@@ -84,6 +101,159 @@ Write-Log "起動 v$Version PowerShell $($PSVersionTable.PSVersion) Windows $([E
 
 # v1 の exe 版が使っていたレジストリの自動起動を消す
 Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $AppName -ErrorAction SilentlyContinue
+
+# 消すスクリプトの正本。自動更新で届くのは copathy.ps1 だけなので、起動のたびに uninstall.ps1 として書き出す。
+# 本体が起動できなくなっても、「設定 > アプリ」からこれで消せる。@@APPNAME@@ は書き出すときに $AppName に置きかえる
+$uninstallScript = @'
+# copathy を消すスクリプト。copathy.ps1 が起動のたびに書き出す（ここを直しても上書きされる）
+# -Yes: 確認しない / -Quiet: 画面を出さず確認もしない（結果は終了コードで返す）/ -HoldsLock: 呼んだ側（インストーラー）が排他を持っている
+# 終了コード: 0 消えた / 1 消せなかったものがある / 2 インストールか消すが動いていて何もしなかった / 3 取りやめた
+param([switch]$Yes, [switch]$Quiet, [switch]$HoldsLock)
+$AppName = '@@APPNAME@@'
+$dir = Join-Path $env:LOCALAPPDATA $AppName
+$appId = "ogura-ryoya.$AppName"
+$log = Join-Path $env:TEMP "$AppName-uninstall.log"   # フォルダごと消すので、ログは TEMP に置く
+function Log($t) { try { Add-Content $log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$PID] アンインストール: $($t -replace '\s*\r?\n\s*', ' | ')" -Encoding UTF8 } catch {} }
+function Show($text, $icon) {
+    if ($Quiet) { return }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0 }
+        $owner.Show(); $owner.Activate()
+        [System.Windows.Forms.MessageBox]::Show($owner, $text, "$AppName のアンインストール", 'OK', $icon) | Out-Null
+        $owner.Dispose()
+    } catch { Log "画面を出せなかった: $_" }
+}
+# 作業フォルダが消すフォルダの中だと消せない
+Set-Location $env:TEMP
+[Environment]::CurrentDirectory = $env:TEMP
+try { if ((Test-Path $log) -and (Get-Item $log).Length -gt 100KB) { Remove-Item $log -ErrorAction SilentlyContinue } } catch {}
+trap {
+    Log "想定外のエラーで止まった: $_ $($_.InvocationInfo.PositionMessage)"
+    Show "想定外のエラーで止まった。`n`n$_`n`n理由はログに残した: $log" 'Error'
+    exit 1
+}
+
+# インストール・消すの排他（先に動いているほうが結果を知らせるので、後からのものは何もしない）
+if (-not $HoldsLock) {
+    $setup = New-Object System.Threading.Mutex($false, "Local\$($AppName)Setup")
+    try { $got = $setup.WaitOne(0) } catch { $got = ($_.Exception -is [System.Threading.AbandonedMutexException]) -or ($_.Exception.InnerException -is [System.Threading.AbandonedMutexException]) }
+    if (-not $got) {
+        Log 'インストールか消す処理が動いているので、何もしないで終わる'
+        # 相手がインストール（印を持っている）なら知らせる。相手が消す処理なら、先に動いているほうが結果を知らせる
+        $other = $null; $installing = $false
+        try { if ([Threading.Mutex]::TryOpenExisting("Local\$($AppName)Installing", [ref]$other)) { $other.Dispose(); $installing = $true } } catch {}
+        if ($installing) {
+            Show "$AppName のインストールが動いているので、何も消さなかった。それが終わってから、もう一度消す。" 'Information'
+        }
+        exit 2
+    }
+}
+# 消し残したとき、消し直せるよう自分を書き戻すための控え
+$selfText = $null
+try { if ($PSCommandPath) { $selfText = [IO.File]::ReadAllText($PSCommandPath, (New-Object System.Text.UTF8Encoding $true)) } } catch {}
+$selfPath = Join-Path $dir 'uninstall.ps1'
+# フォルダは、自分（uninstall.ps1）を最後にして消す（途中で止まっても、自分が残って「設定 > アプリ」から消し直せる）
+function Remove-Dir {
+    $others = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop | Where-Object { $_.FullName -ine $selfPath })
+    $first = $null
+    foreach ($c in $others) { try { Remove-Item -LiteralPath $c.FullName -Recurse -Force -ErrorAction Stop } catch { if (-not $first) { $first = $_ } } }
+    if ($first) { throw $first }
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
+}
+# 動いている間（確認を出している間も）、copathy が更新を始めないよう印を持つ
+$busy = New-Object System.Threading.Mutex($false, "Local\$($AppName)Uninstalling")
+Log "開始 $dir $(if ($Quiet) { '画面なし' } elseif ($Yes) { '確認なし' } else { '確認あり' })"
+
+if (-not ($Yes -or $Quiet)) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0 }
+    $owner.Show(); $owner.Activate()
+    $answer = [System.Windows.Forms.MessageBox]::Show($owner, "$AppName をアンインストールする？`n`n自動起動、スタートメニューのショートカット、$dir（ログも含む）、通知の設定、「設定 > アプリ」の登録をすべて消す。元に戻せない。",
+        "$AppName のアンインストール", 'YesNo', 'Warning', 'Button2')
+    $owner.Dispose()
+    if ($answer -ne 'Yes') { Log '取りやめた'; exit 3 }
+}
+
+# 合図で copathy に終わってもらう
+$quit = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Local\$($AppName)Quit")
+$mutex = New-Object System.Threading.Mutex($false, "Local\$AppName")
+[void]$quit.Set()
+try { $stopped = $mutex.WaitOne(15000) } catch { $stopped = $true }  # 強制終了されて放棄されたものも空いた扱い
+[void]$quit.Reset()
+if ($stopped) { try { $mutex.ReleaseMutex() } catch {} }
+# まだ残っているもの（合図で終わらない版、更新の途中で前の版と新しい版が両方いるとき）はインストール先を含むものをすべて止める
+$findRunning = { @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.ProcessId -ne $PID -and "$($_.CommandLine)".IndexOf("$dir\", [StringComparison]::OrdinalIgnoreCase) -ge 0 }) }
+foreach ($p in (& $findRunning)) {
+    Log "動いている $AppName（$($p.ProcessId)）が合図で終わらないので止める"
+    Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+    Wait-Process -Id $p.ProcessId -Timeout 5 -ErrorAction SilentlyContinue
+}
+
+# 消す。登録は、ほかがすべて消えたときだけ最後に消す（残ったら「設定 > アプリ」から消し直せる）
+$targets = @(
+    (Join-Path ([Environment]::GetFolderPath('Startup')) "$AppName.lnk"),
+    (Join-Path ([Environment]::GetFolderPath('Programs')) "$AppName.lnk"),
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\$appId",
+    $dir)
+$why = @{}
+for ($i = 0; $i -lt 3; $i++) {
+    foreach ($t in $targets) {
+        if (Test-Path -LiteralPath $t) {
+            if ($t -eq $dir -and @($targets | Where-Object { $_ -ne $dir -and (Test-Path -LiteralPath $_) }).Count -gt 0) { $why[$t] = 'ほかが消えていないので、消さずに残した'; continue }
+            try { if ($t -eq $dir) { Remove-Dir } else { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction Stop }; $why.Remove($t) } catch { $why[$t] = "$($_.Exception.Message)" }
+        }
+    }
+    if (@($targets | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) { break }
+    Start-Sleep -Seconds 1
+}
+# フォルダだけ残った（別のプロセスの作業フォルダなど）ときに自分が消えていたら、書き戻す
+if ((Test-Path -LiteralPath $dir) -and $selfText -and -not (Test-Path -LiteralPath $selfPath)) {
+    try { [IO.File]::WriteAllText($selfPath, $selfText, (New-Object System.Text.UTF8Encoding $true)); Log 'フォルダが残ったので uninstall.ps1 を書き戻した' } catch { Log "uninstall.ps1 を書き戻せなかった: $_" }
+}
+$left = @($targets | Where-Object { Test-Path -LiteralPath $_ })
+if ($left.Count -eq 0) {
+    $regKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName"
+    try { if (Test-Path -LiteralPath $regKey) { Remove-Item -LiteralPath $regKey -Recurse -Force -ErrorAction Stop } } catch { $why[$regKey] = "$($_.Exception.Message)" }
+    if (Test-Path -LiteralPath $regKey) { $left = @($regKey) }
+}
+if ($left.Count -eq 0) {
+    Log '消した'
+    # すべて消せたので、調べるためのログは要らない（インストーラーが片づけに呼んだときは、失敗の理由なので残す）
+    if (-not $HoldsLock) { Remove-Item -LiteralPath $log, (Join-Path $env:TEMP "$AppName-install.log") -Force -ErrorAction SilentlyContinue }
+    exit 0
+}
+foreach ($t in $left) { Log "消せなかった: $t（$($why[$t])）" }
+$leftText = ($left | ForEach-Object { $_ -replace '^HKCU:', 'HKEY_CURRENT_USER' }) -join "`n"
+if (Test-Path -LiteralPath $selfPath) {
+    Show "消せなかったものがある。使っているものを閉じてから、「設定 > アプリ」の $AppName をもう一度アンインストールする。`n`n消せなかったもの:`n$leftText`n`n理由はログに残した: $log" 'Warning'
+} else {
+    Show "消せなかったものがある。消すスクリプトも無いので、次のものを手で消す。`n`n$leftText`n`nレジストリの登録（HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName）が残っていれば、それも消す。理由はログに残した: $log" 'Warning'
+}
+exit 1
+'@
+
+# 消すスクリプトと「設定 > アプリ」の登録を、ショートカットより先に書く（インストール先でだけ）。書けなかったことはログに残す
+if ($isInstalled) {
+    try {
+        $utf8Bom = New-Object System.Text.UTF8Encoding $true
+        $scriptText = $uninstallScript.Replace('@@APPNAME@@', $AppName)
+        $current = if (Test-Path $uninstallPs1) { [IO.File]::ReadAllText($uninstallPs1, $utf8Bom) } else { $null }
+        if ($current -cne $scriptText) { [IO.File]::WriteAllText($uninstallPs1, $scriptText, $utf8Bom) }
+    } catch { Write-Log "消すスクリプト（uninstall.ps1）を書けなかった: $_" }
+    try {
+        if (-not (Test-Path -LiteralPath $uninstallKey)) { [void](New-Item $uninstallKey -Force) }
+        $entries = [ordered]@{
+            DisplayName = $AppName; DisplayVersion = $Version; Publisher = 'ogura-ryoya'; DisplayIcon = $icoPath
+            InstallLocation = $appDir; URLInfoAbout = "https://github.com/$Repo"
+            UninstallString = "`"$conhost`" $uninstallArgs"
+        }
+        foreach ($name in $entries.Keys) { Set-ItemProperty -LiteralPath $uninstallKey -Name $name -Value $entries[$name] -ErrorAction Stop }
+        foreach ($name in 'NoModify', 'NoRepair') { Set-ItemProperty -LiteralPath $uninstallKey -Name $name -Value 1 -Type DWord -ErrorAction Stop }
+    } catch { Write-Log "「設定 > アプリ」の登録を書けなかった: $_" }
+} else {
+    Write-Log "$appDir はインストール先（$installDir）でないので、ショートカット・消すスクリプト・登録は作らない"
+}
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
@@ -211,6 +381,9 @@ public static class AppUserModel {
     [StructLayout(LayoutKind.Explicit)]
     struct PropVariant { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; [FieldOffset(16)] public IntPtr pad; }
 
+    // ショートカットが無いとき（インストール先以外）は、このプロセスに ID だけ設定する
+    public static void SetProcessId(string id) { SetCurrentProcessExplicitAppUserModelID(id); }
+
     // ショートカットに ID を書き込み、このプロセスにも同じ ID を設定する
     public static void SetAppId(string lnkPath, string id) {
         var link = (System.Runtime.InteropServices.ComTypes.IPersistFile)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046")));
@@ -304,14 +477,19 @@ public static class PathText {
 # ショートカットのアイコンに使うので先に作る
 try { [ExplorerHotkey]::SaveIco($icoPath) } catch { Write-Log "アイコンを作れなかった: $_" }
 $autostartFailed = $false
-try { New-Shortcut $startupLnk } catch { $autostartFailed = $true; Write-Log "自動起動を登録できなかった: $_" }
+$startMenuLnkIsNew = $false
+if ($isInstalled) {
+    try { New-Shortcut $startupLnk } catch { $autostartFailed = $true; Write-Log "自動起動を登録できなかった: $_" }
 
-# 通知の見出しにアプリの名前とアイコンを出すため、同じ ID のショートカットをスタートメニューに作る（画面を作る前に行う）
-$startMenuLnkIsNew = -not (Test-Path $startMenuLnk)
-try {
-    New-Shortcut $startMenuLnk
-    [AppUserModel]::SetAppId($startMenuLnk, $appId)
-} catch { Write-Log "スタートメニューのショートカットを作れなかった: $_" }
+    # 通知の見出しにアプリの名前とアイコンを出すため、同じ ID のショートカットをスタートメニューに作る（画面を作る前に行う）
+    $startMenuLnkIsNew = -not (Test-Path $startMenuLnk)
+    try {
+        New-Shortcut $startMenuLnk
+        [AppUserModel]::SetAppId($startMenuLnk, $appId)
+    } catch { Write-Log "スタートメニューのショートカットを作れなかった: $_" }
+} else {
+    [AppUserModel]::SetProcessId($appId)  # ショートカットは作らない（通知の見出しは ID になる）
+}
 
 $shell = New-Object -ComObject Shell.Application
 $hk = New-Object ExplorerHotkey
@@ -408,6 +586,8 @@ $stop = {
 
 # 終了はファイルとスタートメニューのショートカットを残す（そこから起動し直すと自動起動も登録し直す）
 $exitItem.add_Click({
+    # インストール先以外で動かしたものは、インストールした分の自動起動に触らない
+    if (-not $isInstalled) { Write-Log "終了（$appDir はインストール先でないので、自動起動には触らない）"; & $stop; return }
     Remove-Item $startupLnk -ErrorAction SilentlyContinue
     if (Test-Path $startupLnk) {
         Write-Log "終了（自動起動を外せなかった: $startupLnk）"
@@ -417,26 +597,26 @@ $exitItem.add_Click({
 })
 
 $uninstallItem.add_Click({
-    $answer = Show-Dialog "$AppName をアンインストールする？`n`n自動起動、スタートメニューのショートカット、$appDir（ログも含む）をすべて消す。元に戻せない。" `
+    # インストール先でなければ（リポジトリから直接動かしたときなど）消すものがない
+    if (-not $isInstalled) {
+        Write-Log "アンインストール（$appDir はインストール先でないので何もしない）"
+        [void](Show-Dialog "$AppName は $appDir から直接動かしていて、インストールされていないので、消すものがない。" "$AppName のアンインストール" OK Information)
+        return
+    }
+    $answer = Show-Dialog "$AppName をアンインストールする？`n`n自動起動、スタートメニューのショートカット、$appDir（ログも含む）、通知の設定、「設定 > アプリ」の登録をすべて消す。元に戻せない。" `
         "$AppName のアンインストール" YesNo Warning Button2
     # 出している間に終了や更新で止まったときも、ダイアログが閉じられて答えが返るので、止まっていれば何もしない
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes -or $script:stopping) { return }
-    # 通知の設定（Windows が作る）も消す
-    $targets = @($startupLnk, $startMenuLnk, "HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\$appId")
-    Remove-Item $targets -Recurse -ErrorAction SilentlyContinue
-    # インストール先でなければ（リポジトリから直接動かしたときなど）フォルダは消さない
-    if ($appDir -eq (Join-Path $env:LOCALAPPDATA $AppName)) {
-        [Environment]::CurrentDirectory = $env:TEMP
-        Set-Location $env:TEMP
-        Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
-        $targets += $appDir
-    } else { Write-Log "アンインストール（$appDir はインストール先でないので消さない）" }
-    # 消せなかったものは知らせる（フォルダが残っていればログも残っている）
-    $left = @($targets | Where-Object { Test-Path $_ })
-    if ($left.Count -gt 0) {
-        Write-Log "アンインストールで消せなかった: $($left -join ', ')"
-        [void](Show-Dialog "消せなかったものがある。$AppName は終了するので、次のものを手で消す。`n`n$($left -join "`n")" "$AppName のアンインストール" OK Warning)
+    # 消すのは uninstall.ps1 に任せる（確認なしの -Yes で起動して、自分は終わる。消せなかったものは uninstall.ps1 が画面で知らせる）
+    try {
+        if (-not (Test-Path $uninstallPs1)) { throw "$uninstallPs1 が無い" }
+        [void](Start-Process $conhost -ArgumentList "$uninstallArgs -Yes" -WorkingDirectory $env:TEMP)
+    } catch {
+        Write-Log "アンインストールを始められなかった: $_"
+        [void](Show-Dialog "アンインストールを始められなかった。消すスクリプトが無いときは「設定 > アプリ」からも消せないので、https://github.com/$Repo の README の「アンインストール」にある、手で消す場所を消す。`n`n$_" "$AppName のアンインストール" OK Warning)
+        return
     }
+    Write-Log 'アンインストールを uninstall.ps1 に任せて終わる'
     & $stop
 })
 
@@ -445,14 +625,14 @@ $uninstallItem.add_Click({
 # 通信の失敗や壊れたファイルは例外にする。$skip の版には、自動の確認では更新しない。
 # 画面が固まらないよう、別のスレッドで実行する
 $checkUpdate = {
-    param($repo, $current, $skip, $manual)
+    param($repo, $current, $skip, $manual, $tmpName = 'copathy-update.ps1')
     $ErrorActionPreference = 'Stop'
     # 古い既定（Ssl3, Tls）なら TLS 1.2 を足す。SystemDefault なら Windows に任せる（1.3 も使える）
     if ([Net.ServicePointManager]::SecurityProtocol -ne 'SystemDefault') {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     }
     $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'copathy' } -TimeoutSec 15
-    $tmp = Join-Path $env:TEMP 'copathy-update.ps1'
+    $tmp = Join-Path $env:TEMP $tmpName
     try {
         Invoke-WebRequest "https://raw.githubusercontent.com/$repo/$($release.tag_name)/copathy.ps1" -OutFile $tmp -UseBasicParsing -TimeoutSec 30
         $text = [IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8)
@@ -495,7 +675,7 @@ $applyUpdate = {
     $updateTimer.Stop()
     $tray.Visible = $false
     $hk.Dispose()
-    $ready = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\copathyReady')
+    $ready = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Local\$($AppName)Ready")
     [void]$ready.Reset()
     $mutex.ReleaseMutex()
     $mutex.Dispose()
@@ -534,7 +714,7 @@ $startCheck = {
     $updateItem.Enabled = $false
     $updateItem.Text = '更新を確認中…'
     $skip = if (Test-Path $skipFile) { (Get-Content $skipFile -Encoding UTF8 -TotalCount 1) } else { '' }
-    $shellForCheck = [powershell]::Create().AddScript($checkUpdate).AddArgument($Repo).AddArgument($Version).AddArgument($skip).AddArgument($manual)
+    $shellForCheck = [powershell]::Create().AddScript($checkUpdate).AddArgument($Repo).AddArgument($Version).AddArgument($skip).AddArgument($manual).AddArgument("$AppName-update.ps1")
     $script:checking = @{ Shell = $shellForCheck; Async = $shellForCheck.BeginInvoke(); Manual = $manual }
 }
 $updateItem.add_Click({ & $startCheck $true })
@@ -551,7 +731,7 @@ $updateTimer.add_Tick({
     if ($alreadyRunning.WaitOne(0)) {
         $tray.ShowBalloonTip(5000, "$AppName はもう動いている", $Hint, $Info)
     }
-    if ($script:dialogs -gt 0) { return }  # ダイアログを出している間は更新しない
+    if ($script:dialogs -gt 0 -or (Test-Uninstalling)) { return }  # ダイアログを出している間や、消すスクリプトが動いている間は更新しない
     # 手動の確認中は待つ（先に予定を消すと、次の自動の確認がなくなる）
     if ($script:nextCheckAt -and (Get-Date) -ge $script:nextCheckAt -and -not $script:checking) {
         $script:nextCheckAt = $null
@@ -640,7 +820,7 @@ $readyTimer = New-Object System.Windows.Forms.Timer
 $readyTimer.Interval = 1
 $readyTimer.add_Tick({
     $readyTimer.Stop()
-    $script:readySignal = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\copathyReady')
+    $script:readySignal = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Local\$($AppName)Ready")
     [void]$script:readySignal.Set()
     # 更新の途中でなければ、前に残った前の版は要らない（更新の途中なら、待っている前の copathy が消す）
     if (-not $startedByUpdate) { Remove-Item $backupPs1 -ErrorAction SilentlyContinue }
