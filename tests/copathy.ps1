@@ -170,6 +170,18 @@ try {
         $a = $unTemplate.IndexOf('Local\$($AppName)Uninstalling'); $b = $unTemplate.IndexOf("'YesNo'")
         $a -ge 0 -and $b -gt $a
     }
+    Check '消す: 画面を出す所(確認・各種の知らせ・想定外のエラー)は、どれもウィンドウを作る前に Initialize-Ui(拡大率の設定)を呼ぶ' {
+        $def = [regex]::Match($unTemplate, 'function Initialize-Ui\b'); $forms = [regex]::Matches($unTemplate, 'New-Object System\.Windows\.Forms\.Form')
+        $calls = @([regex]::Matches($unTemplate, 'Initialize-Ui') | Where-Object { $_.Index -ne ($def.Index + 9) } | ForEach-Object Index)
+        $ok = $def.Success -and $unTemplate -match 'SetProcessDPIAware' -and $forms.Count -ge 2 -and $forms[0].Index -gt $def.Index
+        $prevForm = $def.Index
+        foreach ($f in $forms) {
+            $c = @($calls | Where-Object { $_ -lt $f.Index -and $_ -gt $prevForm })   # 前のウィンドウより後・このウィンドウより前の呼び出し
+            if ($c.Count -eq 0 -or ($f.Index - ($c | Measure-Object -Maximum).Maximum) -gt 200) { $ok = $false }
+            $prevForm = $f.Index
+        }
+        $ok
+    }
     Check '消す: ほかのものが残る間は、フォルダを消さない(フォルダは最後)' { $unTemplate -match '\$_ -ne \$dir -and \(Test-Path -LiteralPath \$_\)' }
     Check 'release.yml: 版の上げ忘れの確かめは、テストの後・リリースの前に、どのブランチでも動く手順(if なし)で、リリースの手順には残さない。並びの group はブランチごと' {
         $y = [IO.File]::ReadAllText((Join-Path $root '.github\workflows\release.yml'), [Text.Encoding]::UTF8) -replace '\r', ''
