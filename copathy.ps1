@@ -114,10 +114,20 @@ $dir = Join-Path $env:LOCALAPPDATA $AppName
 $appId = "ogura-ryoya.$AppName"
 $log = Join-Path $env:TEMP "$AppName-uninstall.log"   # フォルダごと消すので、ログは TEMP に置く
 function Log($t) { try { Add-Content $log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$PID] アンインストール: $($t -replace '\s*\r?\n\s*', ' | ')" -Encoding UTF8 } catch {} }
+# 画面を出す前に、拡大率に合わせてくっきり表示する（しないと引き伸ばされてぼやける）。ウィンドウを作る前に呼ぶ。できなくても文字がぼやけるだけなので、消す処理は続ける
+function Initialize-Ui {
+    Add-Type -AssemblyName System.Windows.Forms
+    if ($script:dpiDone) { return }
+    $script:dpiDone = $true
+    try {
+        Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();' -Name Dpi -Namespace Uninst
+        [void][Uninst.Dpi]::SetProcessDPIAware()
+    } catch { Log "拡大率への対応を設定できなかった: $_" }
+}
 function Show($text, $icon) {
     if ($Quiet) { return }
     try {
-        Add-Type -AssemblyName System.Windows.Forms
+        Initialize-Ui
         $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0 }
         $owner.Show(); $owner.Activate()
         [System.Windows.Forms.MessageBox]::Show($owner, $text, "$AppName のアンインストール", 'OK', $icon) | Out-Null
@@ -166,7 +176,7 @@ $busy = New-Object System.Threading.Mutex($false, "Local\$($AppName)Uninstalling
 Log "開始 $dir $(if ($Quiet) { '画面なし' } elseif ($Yes) { '確認なし' } else { '確認あり' })"
 
 if (-not ($Yes -or $Quiet)) {
-    Add-Type -AssemblyName System.Windows.Forms
+    Initialize-Ui
     $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0 }
     $owner.Show(); $owner.Activate()
     $answer = [System.Windows.Forms.MessageBox]::Show($owner, "$AppName をアンインストールする？`n`n自動起動、スタートメニューのショートカット、$dir（ログも含む）、通知の設定、「設定 > アプリ」の登録をすべて消す。元に戻せない。",
