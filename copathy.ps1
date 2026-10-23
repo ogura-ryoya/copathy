@@ -1,12 +1,10 @@
-﻿# ==== ここから copathy だけ（ほかはテストで copathy・Qpen と同じかを確かめる） ====
-# copathy: エクスプローラーで Ctrl+Alt+C を押すと、選択中のファイル・フォルダのパスをまとめてコピーする。
+﻿# copathy: エクスプローラーで Ctrl+Alt+C を押すと、選択中のファイル・フォルダのパスをまとめてコピーする。
 # トレイに常駐し、自動起動を登録する。起動時と「更新を確認」で GitHub の最新リリースに更新する。
-$Version = '2.4.0'
+$Version = '2.4.1'
 $AppName = 'copathy'
 $Repo = 'ogura-ryoya/copathy'
 $Usage = 'Ctrl+Alt+C でパスをコピー'
 $Hint = 'エクスプローラーでファイルやフォルダを選んで Ctrl+Alt+C を押すと、パスをコピーできる。'  # 通知で使い方を知らせる
-# ==== ここまで ====
 $checkEveryHours = 24  # 起動時のほか、動いている間もこの時間ごとに更新を確認する（スリープで使い続ける PC にも届くように）
 
 $ps1 = $MyInvocation.MyCommand.Path
@@ -83,7 +81,6 @@ if (-not $acquired) { Write-Log 'すでに起動しているので、動いて�
 $quitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Local\$($AppName)Quit")
 $startedByUpdate = Test-Path $updatedFlag
 Write-Log "起動 v$Version PowerShell $($PSVersionTable.PSVersion) Windows $([Environment]::OSVersion.Version) $ps1"
-# ==== ここから copathy だけ ====
 
 # v1 の exe 版が使っていたレジストリの自動起動を消す
 Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $AppName -ErrorAction SilentlyContinue
@@ -301,7 +298,6 @@ public static class PathText {
     }
 }
 "@
-# ==== ここまで ====
 
 [ExplorerHotkey]::EnableDpiAwareness()
 
@@ -322,7 +318,6 @@ $hk = New-Object ExplorerHotkey
 $Warning = [System.Windows.Forms.ToolTipIcon]::Warning
 $Info = [System.Windows.Forms.ToolTipIcon]::Info
 
-# ==== ここから copathy だけ ====
 $hk.add_RegisterFailed({
     Write-Log "Ctrl+Alt+C を登録できなかった（Windows のエラー $($hk.LastError)）。ほかのアプリが Ctrl+Alt+C を使っているかもしれない"
     $tray.ShowBalloonTip(8000, 'Ctrl+Alt+C が使えない',
@@ -369,7 +364,6 @@ $hk.add_Pressed({
         $tray.ShowBalloonTip(5000, 'コピーできなかった', 'もう一度 Ctrl+Alt+C を押す。', $Warning)
     }
 })
-# ==== ここまで ====
 
 $tray = New-Object System.Windows.Forms.NotifyIcon
 $tray.Icon = [ExplorerHotkey]::MakeIcon([System.Windows.Forms.SystemInformation]::SmallIconSize.Width)
